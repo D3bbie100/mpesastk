@@ -45,12 +45,11 @@ app.post('/stkpush', async (req, res) => {
       TransactionDesc: 'Pay before submitting form',
     };
 
-    // STK Push URL (production)
-const stkRes = await axios.post(
-  'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-  payload,
-  { headers: { Authorization: `Bearer ${accessToken}` } }
-);
+    const stkRes = await axios.post(
+      'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+      payload,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
 
     res.json(stkRes.data);
   } catch (err) {
