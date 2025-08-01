@@ -43,7 +43,7 @@ app.post('/stkpush', async (req, res) => {
       TransactionType: 'CustomerPayBillOnline',
       Amount: 10,
       PartyA: phone,
-      PartyB: process.env.MPESA_SHORTCODE,
+      PartyB: '6976785',
       PhoneNumber: phone,
       CallBackURL: process.env.MPESA_CALLBACK_URL,
       AccountReference: 'Payment',
