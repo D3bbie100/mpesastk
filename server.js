@@ -12,14 +12,12 @@ const getAccessToken = async () => {
     `${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`
   ).toString('base64');
 
-  const res = await axios.get(
-    'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-    {
-      headers: {
-        Authorization: `Basic ${auth}`,
-      },
-    }
-  );
+  // STK Push URL (production)
+const stkRes = await axios.post(
+  'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+  payload,
+  { headers: { Authorization: `Bearer ${accessToken}` } }
+);
   return res.data.access_token;
 };
 
@@ -47,11 +45,12 @@ app.post('/stkpush', async (req, res) => {
       TransactionDesc: 'Pay before submitting form',
     };
 
-    const stkRes = await axios.post(
-      'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-      payload,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
+    // STK Push URL (production)
+const stkRes = await axios.post(
+  'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+  payload,
+  { headers: { Authorization: `Bearer ${accessToken}` } }
+);
 
     res.json(stkRes.data);
   } catch (err) {
