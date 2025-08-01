@@ -27,7 +27,9 @@ const getAccessToken = async () => {
 app.post('/stkpush', async (req, res) => {
   try {
     const accessToken = await getAccessToken();
+
     const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+
     const password = Buffer.from(
       process.env.MPESA_SHORTCODE + process.env.MPESA_PASSKEY + timestamp
     ).toString('base64');
@@ -48,6 +50,8 @@ app.post('/stkpush', async (req, res) => {
       TransactionDesc: 'Pay before submitting form',
     };
 
+    console.log("Payload being sent:", payload); // 🔍 Debug print
+
     const stkRes = await axios.post(
       'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
       payload,
@@ -56,7 +60,7 @@ app.post('/stkpush', async (req, res) => {
 
     res.json(stkRes.data);
   } catch (err) {
-    console.error(err.response?.data || err.message);
+    console.error("❌ Error response from Safaricom:", err.response?.data || err.message);
     res.status(500).json({ error: 'STK Push failed' });
   }
 });
