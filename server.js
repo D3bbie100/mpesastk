@@ -46,8 +46,8 @@ app.post('/stkpush', async (req, res) => {
       PartyB: process.env.MPESA_SHORTCODE,
       PhoneNumber: phone,
       CallBackURL: process.env.MPESA_CALLBACK_URL,
-      AccountReference: 'GoogleFormPayment',
-      TransactionDesc: 'Pay before submitting form',
+      AccountReference: 'Payment',
+      TransactionDesc: 'Payment',
     };
 
     console.log("Payload being sent:", payload); // 🔍 Debug print
