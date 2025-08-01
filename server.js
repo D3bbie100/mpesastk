@@ -59,10 +59,19 @@ app.post('/stkpush', async (req, res) => {
     );
 
     res.json(stkRes.data);
-  } catch (err) {
-    console.error("❌ Error response from Safaricom:", err.response?.data || err.message);
-    res.status(500).json({ error: 'STK Push failed' });
+} catch (err) {
+  if (err.response) {
+    console.error("❌ Error response from Safaricom:", {
+      status: err.response.status,
+      data: err.response.data,
+      headers: err.response.headers,
+    });
+  } else {
+    console.error("❌ Request failed:", err.message);
   }
+
+  res.status(500).json({ error: 'STK Push failed' });
+}
 });
 
 app.post('/callback', (req, res) => {
