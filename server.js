@@ -40,7 +40,7 @@ app.post('/stkpush', async (req, res) => {
       BusinessShortCode: process.env.MPESA_SHORTCODE,
       Password: password,
       Timestamp: timestamp,
-      TransactionType: 'CustomerPayBillOnline',
+      TransactionType: 'CustomerBuyGoodsOnline',
       Amount: 10,
       PartyA: phone,
       PartyB: '6976785',
