@@ -1,28 +1,64 @@
 <!DOCTYPE html>
-<html>
-<head>
-  <title>Pay Ksh. 10</title>
-</head>
-<body>
-  <h3>Enter your phone number to receive a prompt</h3>
-  <form id="stkForm">
-    <label>Enter Phone Number (2547XXXXXXXX):</label><br />
-    <input type="text" id="phone" required /><br /><br />
-    <button type="submit">Receive M-Pesa prompt</button>
-  </form>
-  <pre id="result"></pre>
-  <script>
-    document.getElementById('stkForm').addEventListener('submit', async function (e) {
-      e.preventDefault();
-      const phone = document.getElementById('phone').value;
-      const response = await fetch('/stkpush', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone })
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Subscribe to Job Updates</title>
+    <style>
+      body { font-family: Arial, sans-serif; background:#f8f9fa; padding:40px; }
+      form { max-width:480px; margin:auto; background:#fff; padding:24px; border-radius:10px; box-shadow:0 3px 10px rgba(0,0,0,0.08); }
+      h2 { text-align:center; color:#222; }
+      input, select, button { width:100%; padding:12px; margin:10px 0; border-radius:6px; border:1px solid #ccc; font-size:15px; }
+      button { background:#2bb741; color:#fff; border:none; cursor:pointer; }
+      p.notice { font-size:14px; color:#555; text-align:center; margin-top:6px; }
+      #message { text-align:center; margin-top:8px; color:#333; }
+    </style>
+  </head>
+  <body>
+    <form id="subscribeForm">
+      <h2>Subscribe to Job Updates</h2>
+      <input id="name" placeholder="Full name" required />
+      <input id="email" type="email" placeholder="Email address" required />
+      <input id="phone" placeholder="M-PESA phone (2547...)" required />
+      <select id="industry" required>
+        <option value="">Select your Industry</option>
+        <option value="technology">Technology</option>
+        <option value="finance">Finance</option>
+        <option value="sales_and_marketing">Sales and Marketing</option>
+        <option value="food_and_hospitality">Food and Hospitality</option>
+        <option value="education">Education</option>
+        <option value="medical">Medical</option>
+        <option value="government">Government</option>
+        <option value="non_profit">Non-Profit</option>
+        <option value="unskilled_and_administrative">Unskilled and Administrative</option>
+        <option value="supply_chain_and_procurement">Supply Chain, Procurement and Others</option>
+      </select>
+      <p class="notice">Once you click <strong>Subscribe</strong>, you'll receive an <strong>M‑PESA prompt</strong> for Ksh 100 on your phone to complete payment.</p>
+      <button type="submit">Subscribe & Pay</button>
+      <div id="message"></div>
+    </form>
+    <script>
+      const form = document.getElementById('subscribeForm');
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('name').value.trim();
+        const email = document.getElementById('email').value.trim();
+        const phone = document.getElementById('phone').value.trim();
+        const industry = document.getElementById('industry').value;
+        document.getElementById('message').textContent = 'Sending payment prompt...';
+        try {
+          const resp = await fetch('/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type':'application/json' },
+            body: JSON.stringify({ name, email, phone, industry })
+          });
+          const data = await resp.json();
+          document.getElementById('message').textContent = data.message || 'Check your phone for an M-PESA prompt.';
+        } catch (err) {
+          document.getElementById('message').textContent = 'Error initiating payment. Try again.';
+          console.error(err);
+        }
       });
-      const result = await response.json();
-      document.getElementById('result').textContent = JSON.stringify(result, null, 2);
-    });
-  </script>
-</body>
+    </script>
+  </body>
 </html>
