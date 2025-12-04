@@ -67,7 +67,7 @@ app.post("/subscribe", async (req, res) => {
       Password: password,
       Timestamp: timestamp,
       TransactionType: "CustomerBuyGoodsOnline",
-      Amount: 100,
+      Amount: 10,
       PartyA: phone,
       PartyB: "6976785",
       PhoneNumber: phone,
