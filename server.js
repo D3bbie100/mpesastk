@@ -62,6 +62,8 @@ app.post("/subscribe", async (req, res) => {
       process.env.MPESA_SHORTCODE + process.env.MPESA_PASSKEY + timestamp
     ).toString("base64");
 
+    const callbackURL = `${process.env.MPESA_CALLBACK_URL}?token=${process.env.SAFARICOM_CALLBACK_TOKEN}`;
+
     const payload = {
       BusinessShortCode: process.env.MPESA_SHORTCODE,
       Password: password,
@@ -71,7 +73,7 @@ app.post("/subscribe", async (req, res) => {
       PartyA: phone,
       PartyB: "6976785",
       PhoneNumber: phone,
-      CallBackURL: process.env.MPESA_CALLBACK_URL,
+      CallBackURL: callbackURL,
       AccountReference: accountRef,
       TransactionDesc: `Subscription (${industry})`,
     };
@@ -96,19 +98,15 @@ app.post("/subscribe", async (req, res) => {
       stkData = JSON.parse(rawText);
     } catch (e) {}
 
-    // ******************************************************
-    // 🔥 FIX: STORE CheckoutRequestID → pending data
-    // ******************************************************
+    // 🔥 Store pending using CheckoutRequestID
     if (stkData?.CheckoutRequestID) {
       pending[stkData.CheckoutRequestID] = pending[accountRef];
       pending[stkData.CheckoutRequestID].originalRef = accountRef;
     }
-    // ******************************************************
 
     return res.json({
       status: "pending",
-      message:
-        "M-PESA payment prompt sent. Confirm to complete subscription.",
+      message: "M-PESA payment prompt sent. Confirm to complete subscription.",
       reference: accountRef,
       stk: stkData,
     });
@@ -123,32 +121,29 @@ app.post("/subscribe", async (req, res) => {
 // ---------------------- CALLBACK ----------------------
 app.post("/callback", async (req, res) => {
   try {
+    // 🔐 SAFARICOM CALLBACK VALIDATION
+    const providedToken = req.query.token;
+    if (providedToken !== process.env.SAFARICOM_CALLBACK_TOKEN) {
+      console.warn("❌ Invalid callback token — rejected callback");
+      return res.status(403).json({ ResultCode: 1, ResultDesc: "Forbidden" });
+    }
+
     const body = req.body;
     const stkCallback = body?.Body?.stkCallback;
     if (!stkCallback) return res.status(200).json({ result: "no-callback" });
 
     const resultCode = stkCallback.ResultCode;
-
-    // ******************************************************
-    // 🔥 FIX: ALWAYS use CheckoutRequestID — NOT AccountReference
-    // ******************************************************
-    const accountRef = stkCallback.CheckoutRequestID;
-    // ******************************************************
+    const checkoutID = stkCallback.CheckoutRequestID;
 
     const items = stkCallback?.CallbackMetadata?.Item || [];
     const phoneItem = items.find((it) => it.Name === "PhoneNumber");
     const payerPhone = phoneItem?.Value;
 
-    const amountItem = items.find((it) => it.Name === "Amount");
-    const amount = amountItem?.Value;
-
-    const receiptItem =
-      items.find((it) => it.Name === "MpesaReceiptNumber");
+    const receiptItem = items.find((it) => it.Name === "MpesaReceiptNumber");
     const receipt = receiptItem?.Value;
 
-    // If payment succeeded and user exists in pending
-    if (resultCode === 0 && pending[accountRef]) {
-      const entry = pending[accountRef];
+    if (resultCode === 0 && pending[checkoutID]) {
+      const entry = pending[checkoutID];
       const { name, email, industry } = entry;
 
       const key = `MAILERLITE_GROUP_${industry
@@ -177,7 +172,7 @@ app.post("/callback", async (req, res) => {
         console.error("MailerLite error:", e);
       }
 
-      delete pending[accountRef];
+      delete pending[checkoutID];
 
       return res.status(200).json({ ResultCode: 0, ResultDesc: "Processed" });
     }
