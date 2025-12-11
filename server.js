@@ -46,19 +46,6 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-
-// =============================================================
-// ✅ SAFARICOM CALLBACK TOKEN VALIDATION
-// =============================================================
-function validateSafaricomCallback(req) {
-  const token = req.query.token;
-  if (!token) return false;
-
-  const expected = process.env.CALLBACK_TOKEN;
-  return token === expected;
-}
-
-
 // ---------------------- SUBSCRIBE ----------------------
 app.post("/subscribe", async (req, res) => {
   try {
@@ -68,11 +55,14 @@ app.post("/subscribe", async (req, res) => {
     pending[accountRef] = { name, email, phone, industry, createdAt: Date.now() };
 
     const token = await getMpesaToken();
+
     const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
 
     const password = Buffer.from(
       process.env.MPESA_SHORTCODE + process.env.MPESA_PASSKEY + timestamp
     ).toString("base64");
+
+    const callbackURL = `${process.env.MPESA_CALLBACK_URL}?token=${process.env.SAFARICOM_CALLBACK_TOKEN}`;
 
     const payload = {
       BusinessShortCode: process.env.MPESA_SHORTCODE,
@@ -83,7 +73,7 @@ app.post("/subscribe", async (req, res) => {
       PartyA: phone,
       PartyB: "6976785",
       PhoneNumber: phone,
-      CallBackURL: process.env.MPESA_CALLBACK_URL,
+      CallBackURL: callbackURL,
       AccountReference: accountRef,
       TransactionDesc: `Subscription (${industry})`,
     };
@@ -108,7 +98,7 @@ app.post("/subscribe", async (req, res) => {
       stkData = JSON.parse(rawText);
     } catch (e) {}
 
-    // Store the CheckoutRequestID → pending user
+    // 🔥 Store pending using CheckoutRequestID
     if (stkData?.CheckoutRequestID) {
       pending[stkData.CheckoutRequestID] = pending[accountRef];
       pending[stkData.CheckoutRequestID].originalRef = accountRef;
@@ -128,66 +118,14 @@ app.post("/subscribe", async (req, res) => {
   }
 });
 
-
-// =============================================================
-// 🔥 MAILERLITE HELPERS
-// =============================================================
-
-// Get subscriber by email
-async function findSubscriber(email) {
-  const res = await fetch(
-    `https://connect.mailerlite.com/api/subscribers/${encodeURIComponent(email)}`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
-      },
-    }
-  );
-
-  if (res.status === 404) return null;
-  return await res.json();
-}
-
-// Remove subscriber from group
-async function removeFromGroup(subscriberId, groupId) {
-  await fetch(
-    `https://connect.mailerlite.com/api/subscribers/${subscriberId}/groups/${groupId}`,
-    {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
-      },
-    }
-  );
-}
-
-// Add (or re-add) subscriber
-async function addToGroup(email, name, phone, groupId) {
-  const payload = {
-    email,
-    name,
-    fields: { phone },
-    groups: [groupId],
-  };
-
-  await fetch(`https://connect.mailerlite.com/api/subscribers`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
-    },
-    body: JSON.stringify(payload),
-  });
-}
-
-
 // ---------------------- CALLBACK ----------------------
 app.post("/callback", async (req, res) => {
   try {
-    // SAFARICOM CALLBACK VALIDATION
-    if (!validateSafaricomCallback(req)) {
-      console.log("❌ Invalid Safaricom token");
-      return res.status(200).json({ ResultCode: 0, ResultDesc: "Invalid token" });
+    // 🔐 SAFARICOM CALLBACK VALIDATION
+    const providedToken = req.query.token;
+    if (providedToken !== process.env.SAFARICOM_CALLBACK_TOKEN) {
+      console.warn("❌ Invalid callback token — rejected callback");
+      return res.status(403).json({ ResultCode: 1, ResultDesc: "Forbidden" });
     }
 
     const body = req.body;
@@ -195,53 +133,108 @@ app.post("/callback", async (req, res) => {
     if (!stkCallback) return res.status(200).json({ result: "no-callback" });
 
     const resultCode = stkCallback.ResultCode;
+    const checkoutID = stkCallback.CheckoutRequestID;
 
-    // Identify user using CheckoutRequestID
-    const accountRef = stkCallback.CheckoutRequestID;
     const items = stkCallback?.CallbackMetadata?.Item || [];
     const phoneItem = items.find((it) => it.Name === "PhoneNumber");
-    const payerPhone = phoneItem?.Value;
+    const payerPhone = phoneItem?.Value || "";
 
-    if (resultCode === 0 && pending[accountRef]) {
-      const entry = pending[accountRef];
+    if (resultCode === 0 && pending[checkoutID]) {
+      const entry = pending[checkoutID];
       const { name, email, industry } = entry;
 
+      // Determine group ID
       const key = `MAILERLITE_GROUP_${industry
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "_")}`;
-
       const groupId = process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
 
+      // =====================================================
+      // 🔥 STEP 1: Search for subscriber by email
+      // =====================================================
+      let subscriber = null;
+
       try {
-        // 🔥 CHECK IF SUBSCRIBER EXISTS
-        const subscriber = await findSubscriber(email);
-
-        if (subscriber) {
-          const isInGroup = subscriber.groups?.some((g) => g.id === groupId);
-          if (isInGroup) {
-            // 🔥 REMOVE FIRST to refresh timestamp
-            await removeFromGroup(subscriber.id, groupId);
+        const searchRes = await fetch(
+          `https://connect.mailerlite.com/api/subscribers?filter[email]=${encodeURIComponent(email)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
+              "Content-Type": "application/json",
+            },
           }
+        );
+
+        const searchData = await searchRes.json();
+        if (searchData?.data?.length > 0) {
+          subscriber = searchData.data[0];
         }
-
-        // 🔥 ADD (or re-add) subscriber to group
-        await addToGroup(email, name, payerPhone || "", groupId);
-
-      } catch (e) {
-        console.error("MailerLite error:", e);
+      } catch (err) {
+        console.error("Search subscriber error:", err);
       }
 
-      delete pending[accountRef];
+      // =====================================================
+      // 🔥 STEP 2: If subscriber exists AND is in this group → remove ONLY from that group
+      // =====================================================
+      if (subscriber) {
+        try {
+          const groups = subscriber.groups || [];
+
+          const inGroup = groups.some((g) => g.id === groupId);
+
+          if (inGroup) {
+            await fetch(
+              `https://connect.mailerlite.com/api/groups/${groupId}/subscribers/${subscriber.id}`,
+              {
+                method: "DELETE",
+                headers: {
+                  Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
+                },
+              }
+            );
+            console.log(`✔ Removed ${email} from group ${groupId}`);
+          }
+        } catch (err) {
+          console.error("Error removing subscriber from group:", err);
+        }
+      }
+
+      // =====================================================
+      // 🔥 STEP 3: Add subscriber to this group (fresh timestamp)
+      // =====================================================
+      const mlPayload = {
+        email,
+        name,
+        fields: { phone: payerPhone },
+        groups: [groupId],
+      };
+
+      try {
+        await fetch("https://connect.mailerlite.com/api/subscribers", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
+          },
+          body: JSON.stringify(mlPayload),
+        });
+        console.log(`✔ Added subscriber: ${email} to group ${groupId}`);
+      } catch (e) {
+        console.error("MailerLite add error:", e);
+      }
+
+      delete pending[checkoutID];
+
       return res.status(200).json({ ResultCode: 0, ResultDesc: "Processed" });
     }
 
     return res.status(200).json({ ResultCode: 0, ResultDesc: "No action taken" });
+
   } catch (err) {
-    console.error(err);
+    console.error("Callback error:", err);
     return res.status(200).json({ ResultCode: 0, ResultDesc: "Error handled" });
   }
 });
-
 
 // ---------------------- START ----------------------
 app.listen(PORT, () => {
