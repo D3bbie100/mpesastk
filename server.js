@@ -137,76 +137,26 @@ app.post("/callback", async (req, res) => {
 
     const items = stkCallback?.CallbackMetadata?.Item || [];
     const phoneItem = items.find((it) => it.Name === "PhoneNumber");
-    const payerPhone = phoneItem?.Value || "";
+    const payerPhone = phoneItem?.Value;
+
+    const receiptItem = items.find((it) => it.Name === "MpesaReceiptNumber");
+    const receipt = receiptItem?.Value;
 
     if (resultCode === 0 && pending[checkoutID]) {
       const entry = pending[checkoutID];
       const { name, email, industry } = entry;
 
-      // Determine group ID
       const key = `MAILERLITE_GROUP_${industry
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "_")}`;
+
       const groupId = process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
 
-      // =====================================================
-      // 🔥 STEP 1: Search for subscriber by email
-      // =====================================================
-      let subscriber = null;
-
-      try {
-        const searchRes = await fetch(
-          `https://connect.mailerlite.com/api/subscribers?filter[email]=${encodeURIComponent(email)}`,
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
-
-        const searchData = await searchRes.json();
-        if (searchData?.data?.length > 0) {
-          subscriber = searchData.data[0];
-        }
-      } catch (err) {
-        console.error("Search subscriber error:", err);
-      }
-
-      // =====================================================
-      // 🔥 STEP 2: If subscriber exists AND is in this group → remove ONLY from that group
-      // =====================================================
-      if (subscriber) {
-        try {
-          const groups = subscriber.groups || [];
-
-          const inGroup = groups.some((g) => g.id === groupId);
-
-          if (inGroup) {
-            await fetch(
-              `https://connect.mailerlite.com/api/groups/${groupId}/subscribers/${subscriber.id}`,
-              {
-                method: "DELETE",
-                headers: {
-                  Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
-                },
-              }
-            );
-            console.log(`✔ Removed ${email} from group ${groupId}`);
-          }
-        } catch (err) {
-          console.error("Error removing subscriber from group:", err);
-        }
-      }
-
-      // =====================================================
-      // 🔥 STEP 3: Add subscriber to this group (fresh timestamp)
-      // =====================================================
       const mlPayload = {
         email,
         name,
-        fields: { phone: payerPhone },
-        groups: [groupId],
+        fields: { phone: payerPhone || "" },
+        groups: groupId ? [groupId] : undefined,
       };
 
       try {
@@ -218,9 +168,8 @@ app.post("/callback", async (req, res) => {
           },
           body: JSON.stringify(mlPayload),
         });
-        console.log(`✔ Added subscriber: ${email} to group ${groupId}`);
       } catch (e) {
-        console.error("MailerLite add error:", e);
+        console.error("MailerLite error:", e);
       }
 
       delete pending[checkoutID];
@@ -229,9 +178,7 @@ app.post("/callback", async (req, res) => {
     }
 
     return res.status(200).json({ ResultCode: 0, ResultDesc: "No action taken" });
-
   } catch (err) {
-    console.error("Callback error:", err);
     return res.status(200).json({ ResultCode: 0, ResultDesc: "Error handled" });
   }
 });
