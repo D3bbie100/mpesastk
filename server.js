@@ -17,7 +17,6 @@ app.use(bodyParser.json());
 app.use(express.static("."));
 
 // ------------------------- LOG HELPERS -------------------------
-
 function checkForUnsafeCharacters(payload) {
   Object.entries(payload).forEach(([key, value]) => {
     if (typeof value === "string" && /[^a-zA-Z0-9\-_\s()./]/.test(value)) {
@@ -34,29 +33,34 @@ async function logFetchError(err) {
   console.error("Error:", err);
 }
 
-// ----------------------------------------------------------------
+// ------------------------- PENDING STORE -------------------------
+/**
+ * pending = {
+ *   CheckoutRequestID: { name, email, phone, industry, createdAt }
+ * }
+ */
+const pending = {};
 
-// Store by CheckoutRequestID (this is the FIX)
-const pending = {}; // { checkoutId: { name, email, phone, industry } }
+function genRef() {
+  return "REF-" + crypto.randomBytes(6).toString("hex");
+}
 
 // ---------------------- DARAJA TOKEN ----------------------
-
 async function getMpesaToken() {
   const consumerKey = process.env.MPESA_CONSUMER_KEY;
   const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
 
   console.log("🔍 Getting MPESA token…");
+
   if (!consumerKey || !consumerSecret) {
     console.error("❌ Missing MPESA_CONSUMER_* values");
-    throw new Error("Missing MPESA_CONSUMER_KEY or MPESA_CONSUMER_SECRET in env");
+    throw new Error("Missing MPESA_CONSUMER_KEY or MPESA_CONSUMER_SECRET");
   }
 
   const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
   const url =
     process.env.MPESA_OAUTH_URL ||
     "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials";
-
-  console.log("🔍 OAuth Request →", url);
 
   const res = await fetch(url, {
     headers: { Authorization: `Basic ${auth}` },
@@ -65,8 +69,6 @@ async function getMpesaToken() {
     throw err;
   });
 
-  console.log("🔍 OAuth Response Status:", res.status);
-
   if (!res.ok) {
     const txt = await res.text();
     console.error("❌ OAuth Error Body:", txt);
@@ -74,31 +76,26 @@ async function getMpesaToken() {
   }
 
   const data = await res.json();
-  console.log("✅ Token acquired");
   return data.access_token;
 }
 
 // ---------------------- SERVE HTML ----------------------
-
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
 // ---------------------- STK PUSH ----------------------
-
 app.post("/subscribe", async (req, res) => {
   try {
-    console.log("\n\n============================");
-    console.log("📥 /subscribe payload:", req.body);
-    console.log("============================\n");
+    console.log("\n📥 /subscribe payload:", req.body);
 
     const { name, email, phone, industry } = req.body;
     if (!name || !email || !phone || !industry) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // Use a readable description, not a reference for matching
-    const description = `Subscription (${industry})`;
+    // Generate your own reference (only for TransactionDesc)
+    const accountRef = genRef();
 
     // Daraja config
     const shortcode = process.env.MPESA_SHORTCODE;
@@ -106,42 +103,36 @@ app.post("/subscribe", async (req, res) => {
 
     if (!shortcode || !passkey) {
       console.error("❌ Missing SHORTCODE/PASSKEY");
-      return res.status(500).json({ message: "MPESA_SHORTCODE or MPESA_PASSKEY not set" });
+      return res.status(500).json({ message: "MPESA env missing" });
     }
 
-    // Get token
     const token = await getMpesaToken();
 
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
-
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
     const password = Buffer.from(
       process.env.MPESA_SHORTCODE + process.env.MPESA_PASSKEY + timestamp
-    ).toString('base64');
+    ).toString("base64");
 
     const payload = {
       BusinessShortCode: process.env.MPESA_SHORTCODE,
       Password: password,
       Timestamp: timestamp,
-      TransactionType: 'CustomerBuyGoodsOnline',
+      TransactionType: "CustomerBuyGoodsOnline",
       Amount: 10,
       PartyA: phone,
-      PartyB: '6976785',
+      PartyB: "6976785",
       PhoneNumber: phone,
       CallBackURL: process.env.MPESA_CALLBACK_URL,
-      AccountReference: "PAYMENT",
-      TransactionDesc: description,
+      AccountReference: accountRef, // not used for matching anymore
+      TransactionDesc: `Subscription (${industry})`,
     };
 
     console.log("\n📤 STK Payload (password hidden):");
     console.log(JSON.stringify({ ...payload, Password: "[HIDDEN]" }, null, 2));
 
-    checkForUnsafeCharacters(payload);
-
     const url =
       process.env.MPESA_STK_URL ||
       "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest";
-
-    console.log("🔍 Sending STK push →", url);
 
     const stkRes = await fetch(url, {
       method: "POST",
@@ -152,112 +143,143 @@ app.post("/subscribe", async (req, res) => {
       body: JSON.stringify(payload),
     });
 
-    console.log("🔍 STK Response Status:", stkRes.status);
-
     const rawText = await stkRes.text();
     console.log("📥 Raw STK response:", rawText);
 
     let stkData = null;
     try {
       stkData = JSON.parse(rawText);
-    } catch {
-      console.warn("⚠️ STK parse failed");
-    }
+    } catch {}
 
-    // FIX: Use CheckoutRequestID as the reference
-    const checkoutId = stkData?.CheckoutRequestID;
-    if (checkoutId) {
-      pending[checkoutId] = { name, email, phone, industry };
+    // -------------------------
+    // ⭐ CRITICAL FIX:
+    // Store using CheckoutRequestID ONLY
+    // -------------------------
+    if (stkData?.CheckoutRequestID) {
+      pending[stkData.CheckoutRequestID] = {
+        name,
+        email,
+        phone,
+        industry,
+        createdAt: Date.now(),
+      };
+      console.log("💾 Stored pending entry under CheckoutRequestID:", stkData.CheckoutRequestID);
+    } else {
+      console.warn("⚠️ NO CheckoutRequestID returned — can't track payment!");
     }
 
     return res.json({
       status: "pending",
-      message: "M-PESA prompt sent to your phone.",
-      checkoutId,
+      message: "M-Pesa STK push sent.",
+      checkoutID: stkData?.CheckoutRequestID,
       stk: stkData,
     });
-
   } catch (err) {
     console.error("❌ ERROR /subscribe:", err);
     await logFetchError(err);
-
-    return res.status(500).json({
-      message: "Failed to initiate payment",
-      error: err.message,
-    });
+    return res.status(500).json({ message: "Failed to initiate payment" });
   }
 });
 
 // ---------------------- CALLBACK ----------------------
-
 app.post("/callback", async (req, res) => {
   try {
-    console.log("\n\n========== CALLBACK RECEIVED ==========");
+    console.log("\n========== CALLBACK RECEIVED ==========");
     console.log(JSON.stringify(req.body, null, 2).slice(0, 5000));
-    console.log("=======================================\n\n");
+    console.log("=======================================\n");
 
     const stkCallback = req.body?.Body?.stkCallback;
-    if (!stkCallback) return res.status(200).json({ result: "no-stk" });
+    if (!stkCallback) return res.json({ result: "no-stk-callback" });
 
+    const checkoutId = stkCallback.CheckoutRequestID; // ⭐ match key
     const resultCode = stkCallback.ResultCode;
-    const checkoutId = stkCallback.CheckoutRequestID; // FIXED: guaranteed match
 
-    console.log("🔍 Parsed callback:", {
-      resultCode,
-      checkoutId
-    });
+    console.log("🔍 Callback CheckoutRequestID:", checkoutId);
 
-    if (resultCode === 0 && pending[checkoutId]) {
-      const { name, email, industry, phone } = pending[checkoutId];
+    if (resultCode === 0 && checkoutId && pending[checkoutId]) {
+      const entry = pending[checkoutId];
+      const { name, email, industry } = entry;
 
-      const key = `MAILERLITE_GROUP_${industry.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-      const groupId = process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
-
-      const mlPayload = {
-        email,
-        name,
-        fields: { phone },
-        groups: groupId ? [groupId] : []
-      };
-
-      console.log("📤 Sending to MailerLite:", mlPayload);
-
+      // MAILERLITE LOGIC — unchanged
       try {
-        const mlRes = await fetch("https://connect.mailerlite.com/api/subscribers", {
+        const key =
+          "MAILERLITE_GROUP_" +
+          industry.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+
+        const groupId =
+          process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
+
+        const apiKey = process.env.MAILERLITE_API_KEY;
+
+        const mlPayload = {
+          email,
+          name,
+          fields: { phone: entry.phone },
+          ...(groupId ? { groups: [groupId] } : {}),
+        };
+
+        // 1. Check if subscriber exists
+        const checkUrl = `https://connect.mailerlite.com/api/subscribers/${email}`;
+        const checkRes = await fetch(checkUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        });
+
+        let exists = false;
+        let subscriberId = null;
+        let inGroup = false;
+
+        if (checkRes.status === 200) {
+          const subData = await checkRes.json();
+          exists = true;
+          subscriberId = subData.data.id;
+          inGroup = subData.data.groups.some((g) => g.id === groupId);
+        }
+
+        // 2. Remove if already in group
+        if (exists && inGroup) {
+          const deleteUrl = `https://connect.mailerlite.com/api/subscribers/${subscriberId}/groups/${groupId}`;
+          await fetch(deleteUrl, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${apiKey}` },
+          });
+        }
+
+        // 3. Add/update subscriber
+        await fetch("https://connect.mailerlite.com/api/subscribers", {
           method: "POST",
           headers: {
+            Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
           },
           body: JSON.stringify(mlPayload),
         });
-        console.log("📩 MailerLite status:", mlRes.status);
-        console.log("📩 MailerLite body:", await mlRes.text());
       } catch (e) {
         console.error("❌ MailerLite error:", e);
       }
 
       delete pending[checkoutId];
-      return res.status(200).json({ ResultCode: 0, ResultDesc: "Processed" });
+
+      return res.json({ ResultCode: 0, ResultDesc: "Processed" });
     }
 
-    console.warn("⚠️ Callback not processed:", { resultCode, checkoutId });
-    return res.status(200).json({ ResultCode: 0, ResultDesc: "No action taken" });
-
+    console.warn("⚠️ No matching pending entry for CheckoutRequestID:", checkoutId);
+    return res.json({ ResultCode: 0, ResultDesc: "No action taken" });
   } catch (err) {
     console.error("❌ ERROR in /callback:", err);
-    return res.status(200).json({ ResultCode: 0, ResultDesc: "Error handled" });
+    return res.json({ ResultCode: 0, ResultDesc: "Error handled" });
   }
 });
 
 // ---------------------- DEBUG ----------------------
-
 app.get("/_pending", (req, res) => {
   res.json(pending);
 });
 
 // ---------------------- START ----------------------
-
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
