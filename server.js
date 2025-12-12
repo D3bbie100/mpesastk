@@ -16,10 +16,8 @@ const __dirname = path.dirname(__filename);
 app.use(bodyParser.json());
 app.use(express.static("."));
 
-
 // ------------------------- LOG HELPERS -------------------------
 
-// Log potential unsafe characters (helps identify WAF triggers)
 function checkForUnsafeCharacters(payload) {
   Object.entries(payload).forEach(([key, value]) => {
     if (typeof value === "string" && /[^a-zA-Z0-9\-_\s()./]/.test(value)) {
@@ -28,7 +26,6 @@ function checkForUnsafeCharacters(payload) {
   });
 }
 
-// Log full Safaricom error response
 async function logFetchError(err) {
   if (err.name === "FetchError") {
     console.error("FETCH ERROR:", err);
@@ -39,15 +36,8 @@ async function logFetchError(err) {
 
 // ----------------------------------------------------------------
 
-
-// In-memory pending store (replace with DB in production)
-const pending = {}; // { reference: { name, email, phone, industry, createdAt } }
-
-// Helper to generate short unique reference
-function genRef() {
-  return "REF-" + crypto.randomBytes(6).toString("hex");
-}
-
+// Store by CheckoutRequestID (this is the FIX)
+const pending = {}; // { checkoutId: { name, email, phone, industry } }
 
 // ---------------------- DARAJA TOKEN ----------------------
 
@@ -88,13 +78,11 @@ async function getMpesaToken() {
   return data.access_token;
 }
 
-
 // ---------------------- SERVE HTML ----------------------
 
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
-
 
 // ---------------------- STK PUSH ----------------------
 
@@ -109,14 +97,12 @@ app.post("/subscribe", async (req, res) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // Generate ref
-    const accountRef = genRef();
-    pending[accountRef] = { name, email, phone, industry, createdAt: Date.now() };
+    // Use a readable description, not a reference for matching
+    const description = `Subscription (${industry})`;
 
     // Daraja config
     const shortcode = process.env.MPESA_SHORTCODE;
     const passkey = process.env.MPESA_PASSKEY;
-    const callbackBase = process.env.MPESA_CALLBACK_BASE || "https://job-updates-app.onrender.com";
 
     if (!shortcode || !passkey) {
       console.error("❌ Missing SHORTCODE/PASSKEY");
@@ -126,7 +112,6 @@ app.post("/subscribe", async (req, res) => {
     // Get token
     const token = await getMpesaToken();
 
-    // Timestamp + password
     const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
 
     const password = Buffer.from(
@@ -143,15 +128,13 @@ app.post("/subscribe", async (req, res) => {
       PartyB: '6976785',
       PhoneNumber: phone,
       CallBackURL: process.env.MPESA_CALLBACK_URL,
-      AccountReference: accountRef,
-      TransactionDesc: `Subscription (${industry})`,
+      AccountReference: "PAYMENT",
+      TransactionDesc: description,
     };
 
-    // Show payload with hidden password
-    console.log("\n📤 STK Payload:");
+    console.log("\n📤 STK Payload (password hidden):");
     console.log(JSON.stringify({ ...payload, Password: "[HIDDEN]" }, null, 2));
 
-    // Check for unsafe characters (debugging 400.002.02)
     checkForUnsafeCharacters(payload);
 
     const url =
@@ -167,9 +150,6 @@ app.post("/subscribe", async (req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-    }).catch((err) => {
-      console.error("❌ STK FETCH FAIL:", err);
-      throw err;
     });
 
     console.log("🔍 STK Response Status:", stkRes.status);
@@ -180,15 +160,20 @@ app.post("/subscribe", async (req, res) => {
     let stkData = null;
     try {
       stkData = JSON.parse(rawText);
-    } catch (e) {
-      console.warn("⚠️ STK response JSON parse failed");
+    } catch {
+      console.warn("⚠️ STK parse failed");
+    }
+
+    // FIX: Use CheckoutRequestID as the reference
+    const checkoutId = stkData?.CheckoutRequestID;
+    if (checkoutId) {
+      pending[checkoutId] = { name, email, phone, industry };
     }
 
     return res.json({
       status: "pending",
-      message:
-        "M-PESA payment prompt sent to your phone. Confirm to complete subscription.",
-      reference: accountRef,
+      message: "M-PESA prompt sent to your phone.",
+      checkoutId,
       stk: stkData,
     });
 
@@ -203,7 +188,6 @@ app.post("/subscribe", async (req, res) => {
   }
 });
 
-
 // ---------------------- CALLBACK ----------------------
 
 app.post("/callback", async (req, res) => {
@@ -212,36 +196,19 @@ app.post("/callback", async (req, res) => {
     console.log(JSON.stringify(req.body, null, 2).slice(0, 5000));
     console.log("=======================================\n\n");
 
-    const body = req.body;
-    const stkCallback = body?.Body?.stkCallback;
-    if (!stkCallback) return res.status(200).json({ result: "no-stk-callback-present" });
+    const stkCallback = req.body?.Body?.stkCallback;
+    if (!stkCallback) return res.status(200).json({ result: "no-stk" });
 
     const resultCode = stkCallback.ResultCode;
-    const items = stkCallback?.CallbackMetadata?.Item || [];
-
-    const accountRefItem = items.find((it) => it.Name === "AccountReference");
-    const phoneItem =
-      items.find((it) => it.Name === "PhoneNumber" || it.Name === "MSISDN");
-    const amountItem = items.find((it) => it.Name === "Amount");
-    const receiptItem =
-      items.find((it) => it.Name === "MpesaReceiptNumber" || it.Name === "ReceiptNumber");
-
-    const accountRef = accountRefItem?.Value || stkCallback?.CheckoutRequestID;
-    const payerPhone = phoneItem?.Value;
-    const amount = amountItem?.Value;
-    const receipt = receiptItem?.Value;
+    const checkoutId = stkCallback.CheckoutRequestID; // FIXED: guaranteed match
 
     console.log("🔍 Parsed callback:", {
       resultCode,
-      accountRef,
-      payerPhone,
-      amount,
-      receipt,
+      checkoutId
     });
 
-    if (resultCode === 0 && accountRef && pending[accountRef]) {
-      const entry = pending[accountRef];
-      const { name, email, industry } = entry;
+    if (resultCode === 0 && pending[checkoutId]) {
+      const { name, email, industry, phone } = pending[checkoutId];
 
       const key = `MAILERLITE_GROUP_${industry.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
       const groupId = process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
@@ -249,101 +216,32 @@ app.post("/callback", async (req, res) => {
       const mlPayload = {
         email,
         name,
-        fields: { phone: payerPhone || "" },
+        fields: { phone },
+        groups: groupId ? [groupId] : []
       };
-      if (groupId) mlPayload.groups = [groupId];
+
+      console.log("📤 Sending to MailerLite:", mlPayload);
 
       try {
-  console.log("🚀 Starting MailerLite subscription workflow...");
+        const mlRes = await fetch("https://connect.mailerlite.com/api/subscribers", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.MAILERLITE_API_KEY}`,
+          },
+          body: JSON.stringify(mlPayload),
+        });
+        console.log("📩 MailerLite status:", mlRes.status);
+        console.log("📩 MailerLite body:", await mlRes.text());
+      } catch (e) {
+        console.error("❌ MailerLite error:", e);
+      }
 
-  const apiKey = process.env.MAILERLITE_API_KEY;
-  const groupId = mlPayload.groups[0];
-  const email = mlPayload.email; // make sure you have this
-
-  console.log("🔑 API Key exists?", !!apiKey);
-  console.log("👤 Target email:", email);
-  console.log("📌 Target group:", groupId);
-
-  // 1️⃣ CHECK IF SUBSCRIBER EXISTS
-  console.log("🔍 Checking if subscriber already exists...");
-
-  const checkUrl = `https://connect.mailerlite.com/api/subscribers/${email}`;
-  console.log("🌐 GET URL:", checkUrl);
-
-  const checkRes = await fetch(checkUrl, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-  });
-
-  console.log("📥 Check response status:", checkRes.status);
-
-  let exists = false;
-  let subscriberId = null;
-  let inGroup = false;
-
-  if (checkRes.status === 200) {
-    console.log("✅ Subscriber exists. Parsing response...");
-
-    const subData = await checkRes.json();
-    console.log("🔎 Subscriber data received:", subData);
-
-    exists = true;
-    subscriberId = subData.data.id;
-
-    console.log("🆔 Subscriber ID:", subscriberId);
-    console.log("📚 Groups:", subData.data.groups);
-
-    inGroup = subData.data.groups.some((g) => g.id === groupId);
-    console.log("📍 Subscriber in target group?", inGroup);
-  } else {
-    console.log("ℹ️ Subscriber does NOT exist (status was not 200).");
-  }
-
-  // 2️⃣ REMOVE FROM GROUP IF THEY ALREADY EXIST IN IT
-  if (exists && inGroup) {
-    console.log("🔄 Subscriber already in group → removing them...");
-
-    const deleteUrl = `https://connect.mailerlite.com/api/subscribers/${subscriberId}/groups/${groupId}`;
-    console.log("🌐 DELETE URL:", deleteUrl);
-
-    const removeRes = await fetch(deleteUrl, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-
-    console.log("🧹 Remove response:", removeRes.status, await removeRes.text());
-  }
-
-  // 3️⃣ ADD / UPDATE SUBSCRIBER
-  console.log("➕ Adding subscriber to group...");
-  console.log("📦 Payload being sent:", mlPayload);
-
-  const addRes = await fetch("https://connect.mailerlite.com/api/subscribers", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(mlPayload),
-  });
-
-  console.log("📩 Final MailerLite response status:", addRes.status);
-
-  const finalText = await addRes.text();
-  console.log("📩 Final response body:", finalText);
-
-} catch (e) {
-  console.error("❌ MailerLite error:", e);
-}
-
-      delete pending[accountRef];
+      delete pending[checkoutId];
       return res.status(200).json({ ResultCode: 0, ResultDesc: "Processed" });
     }
 
-    console.warn("⚠️ Callback not processed:", { resultCode, accountRef });
+    console.warn("⚠️ Callback not processed:", { resultCode, checkoutId });
     return res.status(200).json({ ResultCode: 0, ResultDesc: "No action taken" });
 
   } catch (err) {
@@ -352,13 +250,11 @@ app.post("/callback", async (req, res) => {
   }
 });
 
-
 // ---------------------- DEBUG ----------------------
 
 app.get("/_pending", (req, res) => {
   res.json(pending);
 });
-
 
 // ---------------------- START ----------------------
 
