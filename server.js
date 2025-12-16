@@ -10,14 +10,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// TRUST PROXY (required for real IP on Render)
+app.set("trust proxy", true);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 app.use(bodyParser.json());
 app.use(express.static("."));
 
-// ---------------------- TELEGRAM ALERTS ----------------------
-const SAFE_IPS = new Set([
+// ------------------------- SAFARICOM IP ALLOWLIST -------------------------
+const SAFARICOM_IPS = new Set([
+  "196.201.214.200",
   "196.201.214.206",
   "196.201.213.114",
   "196.201.214.207",
@@ -31,22 +35,25 @@ const SAFE_IPS = new Set([
   "196.201.212.69",
 ]);
 
+// ------------------------- TELEGRAM ALERT -------------------------
 async function sendTelegramAlert(message) {
-  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) return;
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+
+  if (!token || !chatId) return;
+
   try {
-    await fetch(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: process.env.TELEGRAM_CHAT_ID,
-          text: message,
-        }),
-      }
-    );
-  } catch (e) {
-    console.error("❌ Telegram alert failed:", e);
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: "Markdown",
+      }),
+    });
+  } catch (err) {
+    console.error("❌ Telegram alert failed:", err);
   }
 }
 
@@ -68,6 +75,11 @@ async function logFetchError(err) {
 }
 
 // ------------------------- PENDING STORE -------------------------
+/**
+ * pending = {
+ *   CheckoutRequestID: { name, email, phone, industry, createdAt }
+ * }
+ */
 const pending = {};
 
 function genRef() {
@@ -79,7 +91,10 @@ async function getMpesaToken() {
   const consumerKey = process.env.MPESA_CONSUMER_KEY;
   const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
 
+  console.log("🔍 Getting MPESA token…");
+
   if (!consumerKey || !consumerSecret) {
+    console.error("❌ Missing MPESA_CONSUMER_* values");
     throw new Error("Missing MPESA_CONSUMER_KEY or MPESA_CONSUMER_SECRET");
   }
 
@@ -90,10 +105,14 @@ async function getMpesaToken() {
 
   const res = await fetch(url, {
     headers: { Authorization: `Basic ${auth}` },
+  }).catch((err) => {
+    console.error("❌ TOKEN FETCH FAILED:", err);
+    throw err;
   });
 
   if (!res.ok) {
     const txt = await res.text();
+    console.error("❌ OAuth Error Body:", txt);
     throw new Error("Failed to get token: " + txt);
   }
 
@@ -109,25 +128,36 @@ app.get("/", (req, res) => {
 // ---------------------- STK PUSH ----------------------
 app.post("/subscribe", async (req, res) => {
   try {
+    console.log("\n📥 /subscribe payload:", req.body);
+
     const { name, email, phone, industry } = req.body;
     if (!name || !email || !phone || !industry) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
     const accountRef = genRef();
+
+    const shortcode = process.env.MPESA_SHORTCODE;
+    const passkey = process.env.MPESA_PASSKEY;
+
+    if (!shortcode || !passkey) {
+      console.error("❌ Missing SHORTCODE/PASSKEY");
+      return res.status(500).json({ message: "MPESA env missing" });
+    }
+
     const token = await getMpesaToken();
 
     const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
     const password = Buffer.from(
-      process.env.MPESA_SHORTCODE + process.env.MPESA_PASSKEY + timestamp
+      shortcode + passkey + timestamp
     ).toString("base64");
 
     const payload = {
-      BusinessShortCode: process.env.MPESA_SHORTCODE,
+      BusinessShortCode: shortcode,
       Password: password,
       Timestamp: timestamp,
       TransactionType: "CustomerBuyGoodsOnline",
-      Amount: 10,
+      Amount: 1,
       PartyA: phone,
       PartyB: "6976785",
       PhoneNumber: phone,
@@ -135,6 +165,9 @@ app.post("/subscribe", async (req, res) => {
       AccountReference: accountRef,
       TransactionDesc: `Subscription (${industry})`,
     };
+
+    console.log("\n📤 STK Payload (password hidden):");
+    console.log(JSON.stringify({ ...payload, Password: "[HIDDEN]" }, null, 2));
 
     const url =
       process.env.MPESA_STK_URL ||
@@ -150,7 +183,12 @@ app.post("/subscribe", async (req, res) => {
     });
 
     const rawText = await stkRes.text();
-    const stkData = JSON.parse(rawText);
+    console.log("📥 Raw STK response:", rawText);
+
+    let stkData = null;
+    try {
+      stkData = JSON.parse(rawText);
+    } catch {}
 
     if (stkData?.CheckoutRequestID) {
       pending[stkData.CheckoutRequestID] = {
@@ -160,27 +198,42 @@ app.post("/subscribe", async (req, res) => {
         industry,
         createdAt: Date.now(),
       };
+      console.log("💾 Stored pending entry:", stkData.CheckoutRequestID);
     }
 
-    res.json({ status: "pending", checkoutID: stkData?.CheckoutRequestID });
+    return res.json({
+      status: "pending",
+      checkoutID: stkData?.CheckoutRequestID,
+      stk: stkData,
+    });
   } catch (err) {
+    console.error("❌ ERROR /subscribe:", err);
     await logFetchError(err);
-    res.status(500).json({ message: "Failed to initiate payment" });
+    return res.status(500).json({ message: "Failed to initiate payment" });
   }
 });
 
 // ---------------------- CALLBACK ----------------------
 app.post("/callback", async (req, res) => {
   try {
-    const ip =
+    // -------- IP CHECK (NON-BLOCKING) --------
+    const clientIp =
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.socket.remoteAddress?.replace("::ffff:", "");
+      req.socket.remoteAddress;
 
-    if (ip && !SAFE_IPS.has(ip)) {
+    if (!SAFARICOM_IPS.has(clientIp)) {
       await sendTelegramAlert(
-        `🚨 UNSAFE CALLBACK IP DETECTED\nIP: ${ip}\nTime: ${new Date().toISOString()}`
+        `🚨 *Unauthorized M-Pesa Callback*\n\nIP: \`${clientIp}\`\n\nPayload:\n\`\`\`${JSON.stringify(
+          req.body,
+          null,
+          2
+        ).slice(0, 3500)}\`\`\``
       );
     }
+
+    console.log("\n========== CALLBACK RECEIVED ==========");
+    console.log(JSON.stringify(req.body, null, 2).slice(0, 5000));
+    console.log("=======================================\n");
 
     const stkCallback = req.body?.Body?.stkCallback;
     if (!stkCallback) return res.json({ result: "no-stk-callback" });
@@ -188,13 +241,82 @@ app.post("/callback", async (req, res) => {
     const checkoutId = stkCallback.CheckoutRequestID;
     const resultCode = stkCallback.ResultCode;
 
+    console.log("🔍 Callback CheckoutRequestID:", checkoutId);
+
     if (resultCode === 0 && checkoutId && pending[checkoutId]) {
+      const entry = pending[checkoutId];
+      const { name, email, industry } = entry;
+
+      // ---------------- MAILERLITE LOGIC (UNCHANGED) ----------------
+      try {
+        const key =
+          "MAILERLITE_GROUP_" +
+          industry.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+
+        const groupId =
+          process.env[key] || process.env.MAILERLITE_DEFAULT_GROUP;
+
+        const apiKey = process.env.MAILERLITE_API_KEY;
+
+        const mlPayload = {
+          email,
+          name,
+          fields: { phone: entry.phone },
+          ...(groupId ? { groups: [groupId] } : {}),
+        };
+
+        // 1. Check if subscriber exists
+        const checkUrl = `https://connect.mailerlite.com/api/subscribers/${email}`;
+        const checkRes = await fetch(checkUrl, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        });
+
+        let exists = false;
+        let subscriberId = null;
+        let inGroup = false;
+
+        if (checkRes.status === 200) {
+          const subData = await checkRes.json();
+          exists = true;
+          subscriberId = subData.data.id;
+          inGroup = subData.data.groups.some((g) => g.id === groupId);
+        }
+
+        // 2. Remove if already in group
+        if (exists && inGroup) {
+          const deleteUrl = `https://connect.mailerlite.com/api/subscribers/${subscriberId}/groups/${groupId}`;
+          await fetch(deleteUrl, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${apiKey}` },
+          });
+        }
+
+        // 3. Add/update subscriber
+        await fetch("https://connect.mailerlite.com/api/subscribers", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(mlPayload),
+        });
+      } catch (e) {
+        console.error("❌ MailerLite error:", e);
+      }
+
       delete pending[checkoutId];
+      return res.json({ ResultCode: 0, ResultDesc: "Processed" });
     }
 
-    res.json({ ResultCode: 0, ResultDesc: "Processed" });
+    console.warn("⚠️ No matching pending entry for CheckoutRequestID:", checkoutId);
+    return res.json({ ResultCode: 0, ResultDesc: "No action taken" });
   } catch (err) {
-    res.json({ ResultCode: 0, ResultDesc: "Error handled" });
+    console.error("❌ ERROR in /callback:", err);
+    return res.json({ ResultCode: 0, ResultDesc: "Error handled" });
   }
 });
 
