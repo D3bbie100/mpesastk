@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -17,9 +17,14 @@
   <body>
     <form id="subscribeForm">
       <h2>Subscribe to Job Updates</h2>
+
       <input id="name" placeholder="Full name" required />
       <input id="email" type="email" placeholder="Email address" required />
       <input id="phone" placeholder="M-PESA phone (2547...)" required />
+
+      <!-- ✅ NEW FIELD -->
+      <input id="referredBy" placeholder="Referred by" />
+
       <select id="industry" required>
         <option value="">Select your Industry</option>
         <option value="technology">Technology</option>
@@ -40,29 +45,44 @@
         <option value="journalism_and_communication">Journalism and Communication</option>
         <option value="others">Others</option>
       </select>
-      <p class="notice">Once you click <strong>Subscribe</strong>, you'll receive an <strong>M‑PESA prompt</strong> for Ksh 100 on your phone to complete payment.</p>
+
+      <p class="notice">
+        Once you click <strong>Subscribe</strong>, you'll receive an 
+        <strong>M-PESA prompt</strong> for Ksh 100 on your phone to complete payment.
+      </p>
+
       <button type="submit">Subscribe & Pay</button>
       <div id="message"></div>
     </form>
+
     <script>
       const form = document.getElementById('subscribeForm');
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
+
         const name = document.getElementById('name').value.trim();
         const email = document.getElementById('email').value.trim();
         const phone = document.getElementById('phone').value.trim();
+        const referredBy = document.getElementById('referredBy').value.trim(); // ✅ NEW
         const industry = document.getElementById('industry').value;
+
         document.getElementById('message').textContent = 'Sending payment prompt...';
+
         try {
           const resp = await fetch('/subscribe', {
             method: 'POST',
             headers: { 'Content-Type':'application/json' },
-            body: JSON.stringify({ name, email, phone, industry })
+            body: JSON.stringify({ name, email, phone, referredBy, industry }) // ✅ UPDATED
           });
+
           const data = await resp.json();
-          document.getElementById('message').textContent = data.message || 'Check your phone for an M-PESA prompt.';
+
+          document.getElementById('message').textContent =
+            data.message || 'Check your phone for an M-PESA prompt.';
         } catch (err) {
-          document.getElementById('message').textContent = 'Error initiating payment. Try again.';
+          document.getElementById('message').textContent =
+            'Error initiating payment. Try again.';
           console.error(err);
         }
       });
