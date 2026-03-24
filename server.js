@@ -209,6 +209,7 @@ app.post("/callback", async (req, res) => {
           email,
           name,
           fields: {
+            name: entry.name,
             phone: entry.phone,
             referred_by: entry.referredBy || "", // ✅ INCLUDED
           },
