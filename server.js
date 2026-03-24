@@ -10,7 +10,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// TRUST PROXY (required for real IP on Render)
 app.set("trust proxy", true);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,7 +38,6 @@ const SAFARICOM_IPS = new Set([
 async function sendTelegramAlert(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-
   if (!token || !chatId) return;
 
   try {
@@ -57,29 +55,7 @@ async function sendTelegramAlert(message) {
   }
 }
 
-// ------------------------- LOG HELPERS -------------------------
-function checkForUnsafeCharacters(payload) {
-  Object.entries(payload).forEach(([key, value]) => {
-    if (typeof value === "string" && /[^a-zA-Z0-9\-_\s()./]/.test(value)) {
-      console.warn(`⚠️ POSSIBLE UNSAFE CHARACTERS detected in ${key}:`, value);
-    }
-  });
-}
-
-async function logFetchError(err) {
-  if (err.name === "FetchError") {
-    console.error("FETCH ERROR:", err);
-    return;
-  }
-  console.error("Error:", err);
-}
-
 // ------------------------- PENDING STORE -------------------------
-/**
- * pending = {
- *   CheckoutRequestID: { name, email, phone, industry, createdAt }
- * }
- */
 const pending = {};
 
 function genRef() {
@@ -91,28 +67,19 @@ async function getMpesaToken() {
   const consumerKey = process.env.MPESA_CONSUMER_KEY;
   const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
 
-  console.log("🔍 Getting MPESA token…");
-
   if (!consumerKey || !consumerSecret) {
-    console.error("❌ Missing MPESA_CONSUMER_* values");
     throw new Error("Missing MPESA_CONSUMER_KEY or MPESA_CONSUMER_SECRET");
   }
 
   const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
-  const url =
-    process.env.MPESA_OAUTH_URL ||
-    "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials";
 
-  const res = await fetch(url, {
-    headers: { Authorization: `Basic ${auth}` },
-  }).catch((err) => {
-    console.error("❌ TOKEN FETCH FAILED:", err);
-    throw err;
-  });
+  const res = await fetch(
+    "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+    { headers: { Authorization: `Basic ${auth}` } }
+  );
 
   if (!res.ok) {
     const txt = await res.text();
-    console.error("❌ OAuth Error Body:", txt);
     throw new Error("Failed to get token: " + txt);
   }
 
@@ -130,7 +97,9 @@ app.post("/subscribe", async (req, res) => {
   try {
     console.log("\n📥 /subscribe payload:", req.body);
 
-    const { name, email, phone, industry } = req.body;
+    // ✅ INCLUDED referredBy
+    const { name, email, phone, referredBy, industry } = req.body;
+
     if (!name || !email || !phone || !industry) {
       return res.status(400).json({ message: "Missing required fields" });
     }
@@ -140,14 +109,13 @@ app.post("/subscribe", async (req, res) => {
     const shortcode = process.env.MPESA_SHORTCODE;
     const passkey = process.env.MPESA_PASSKEY;
 
-    if (!shortcode || !passkey) {
-      console.error("❌ Missing SHORTCODE/PASSKEY");
-      return res.status(500).json({ message: "MPESA env missing" });
-    }
-
     const token = await getMpesaToken();
 
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[^0-9]/g, "")
+      .slice(0, 14);
+
     const password = Buffer.from(
       shortcode + passkey + timestamp
     ).toString("base64");
@@ -166,39 +134,30 @@ app.post("/subscribe", async (req, res) => {
       TransactionDesc: `Subscription (${industry})`,
     };
 
-    console.log("\n📤 STK Payload (password hidden):");
-    console.log(JSON.stringify({ ...payload, Password: "[HIDDEN]" }, null, 2));
+    const stkRes = await fetch(
+      "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
 
-    const url =
-      process.env.MPESA_STK_URL ||
-      "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest";
+    const stkData = await stkRes.json();
 
-    const stkRes = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const rawText = await stkRes.text();
-    console.log("📥 Raw STK response:", rawText);
-
-    let stkData = null;
-    try {
-      stkData = JSON.parse(rawText);
-    } catch {}
-
+    // ✅ STORE referredBy
     if (stkData?.CheckoutRequestID) {
       pending[stkData.CheckoutRequestID] = {
         name,
         email,
         phone,
+        referredBy,
         industry,
         createdAt: Date.now(),
       };
-      console.log("💾 Stored pending entry:", stkData.CheckoutRequestID);
     }
 
     return res.json({
@@ -206,9 +165,9 @@ app.post("/subscribe", async (req, res) => {
       checkoutID: stkData?.CheckoutRequestID,
       stk: stkData,
     });
+
   } catch (err) {
     console.error("❌ ERROR /subscribe:", err);
-    await logFetchError(err);
     return res.status(500).json({ message: "Failed to initiate payment" });
   }
 });
@@ -216,24 +175,13 @@ app.post("/subscribe", async (req, res) => {
 // ---------------------- CALLBACK ----------------------
 app.post("/callback", async (req, res) => {
   try {
-    // -------- IP CHECK (NON-BLOCKING) --------
     const clientIp =
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
       req.socket.remoteAddress;
 
     if (!SAFARICOM_IPS.has(clientIp)) {
-      await sendTelegramAlert(
-        `🚨 *Unauthorized M-Pesa Callback*\n\nIP: \`${clientIp}\`\n\nPayload:\n\`\`\`${JSON.stringify(
-          req.body,
-          null,
-          2
-        ).slice(0, 3500)}\`\`\``
-      );
+      await sendTelegramAlert(`🚨 Unauthorized callback from ${clientIp}`);
     }
-
-    console.log("\n========== CALLBACK RECEIVED ==========");
-    console.log(JSON.stringify(req.body, null, 2).slice(0, 5000));
-    console.log("=======================================\n");
 
     const stkCallback = req.body?.Body?.stkCallback;
     if (!stkCallback) return res.json({ result: "no-stk-callback" });
@@ -241,13 +189,12 @@ app.post("/callback", async (req, res) => {
     const checkoutId = stkCallback.CheckoutRequestID;
     const resultCode = stkCallback.ResultCode;
 
-    console.log("🔍 Callback CheckoutRequestID:", checkoutId);
-
     if (resultCode === 0 && checkoutId && pending[checkoutId]) {
       const entry = pending[checkoutId];
+
       const { name, email, industry } = entry;
 
-      // ---------------- MAILERLITE LOGIC (UNCHANGED) ----------------
+      // ✅ MAILERLITE (WITH referred_by)
       try {
         const key =
           "MAILERLITE_GROUP_" +
@@ -261,41 +208,13 @@ app.post("/callback", async (req, res) => {
         const mlPayload = {
           email,
           name,
-          fields: { phone: entry.phone },
+          fields: {
+            phone: entry.phone,
+            referred_by: entry.referredBy || "", // ✅ INCLUDED
+          },
           ...(groupId ? { groups: [groupId] } : {}),
         };
 
-        // 1. Check if subscriber exists
-        const checkUrl = `https://connect.mailerlite.com/api/subscribers/${email}`;
-        const checkRes = await fetch(checkUrl, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        let exists = false;
-        let subscriberId = null;
-        let inGroup = false;
-
-        if (checkRes.status === 200) {
-          const subData = await checkRes.json();
-          exists = true;
-          subscriberId = subData.data.id;
-          inGroup = subData.data.groups.some((g) => g.id === groupId);
-        }
-
-        // 2. Remove if already in group
-        if (exists && inGroup) {
-          const deleteUrl = `https://connect.mailerlite.com/api/subscribers/${subscriberId}/groups/${groupId}`;
-          await fetch(deleteUrl, {
-            method: "DELETE",
-            headers: { Authorization: `Bearer ${apiKey}` },
-          });
-        }
-
-        // 3. Add/update subscriber
         await fetch("https://connect.mailerlite.com/api/subscribers", {
           method: "POST",
           headers: {
@@ -304,6 +223,7 @@ app.post("/callback", async (req, res) => {
           },
           body: JSON.stringify(mlPayload),
         });
+
       } catch (e) {
         console.error("❌ MailerLite error:", e);
       }
@@ -312,17 +232,12 @@ app.post("/callback", async (req, res) => {
       return res.json({ ResultCode: 0, ResultDesc: "Processed" });
     }
 
-    console.warn("⚠️ No matching pending entry for CheckoutRequestID:", checkoutId);
     return res.json({ ResultCode: 0, ResultDesc: "No action taken" });
+
   } catch (err) {
     console.error("❌ ERROR in /callback:", err);
     return res.json({ ResultCode: 0, ResultDesc: "Error handled" });
   }
-});
-
-// ---------------------- DEBUG ----------------------
-app.get("/_pending", (req, res) => {
-  res.json(pending);
 });
 
 // ---------------------- START ----------------------
