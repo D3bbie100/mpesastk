@@ -207,7 +207,7 @@ app.post("/callback", async (req, res) => {
 
         const mlPayload = {
           email,
-          name,
+          name: entry.name,
           fields: {
             name: entry.name,
             phone: entry.phone,
